@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Editor-specific
+.vscode/
+.idea/
+
+# Temp files
+*.tmp
+*~
+
+# Local test artifacts (if any)
+/test_repo/

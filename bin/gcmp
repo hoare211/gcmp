@@ -1,0 +1,207 @@
+#!/bin/bash
+
+# gcmp.sh - A powerful git comparison script using Beyond Compare.
+# Compares any two git references, including the working directory,
+# staging area, and stashes.
+
+# 确保脚本在任何命令失败时立即退出
+set -e
+# 如果使用了未定义的变量，则脚本退出
+set -u
+
+# --- 全局配置 ---
+# 你可以在这里修改为你喜欢的比较工具命令
+DIFF_TOOL="bcompare"
+
+
+# --- 帮助信息函数 ---
+show_help() {
+cat << EOF
+Usage: $(basename "$0") [repo_path] <ref1> <ref2>
+
+A powerful git comparison script that uses an external diff tool.
+
+It can compare any two git "areas" or references.
+
+Arguments:
+  repo_path     (Optional) Path to the git repository. If omitted, uses the current directory.
+  <ref1>        The first reference to compare.
+  <ref2>        The second reference to compare.
+
+Special Keywords for <ref1> and <ref2>:
+  work          The working directory (all tracked files).
+  stage         The staging area (the index).
+  stash         The most recent stash (equivalent to 'stash@{0}').
+  <commit-ish>  Any valid git reference like a commit hash (abc123d),
+                branch name (main), tag (v1.0), or relative ref (HEAD~2).
+
+Examples:
+  # Compare working directory with the staging area
+  $(basename "$0") work stage
+
+  # Compare working directory with the current branch's head
+  $(basename "$0") work HEAD
+
+  # Compare staging area with a feature branch
+  $(basename "$0") stage my-feature
+
+  # Compare the latest stash with the main branch
+  $(basename "$0") stash main
+
+  # Compare two different stashes
+  $(basename "$0") 'stash@{0}' 'stash@{1}'
+
+  # Compare two commits (original functionality)
+  $(basename "$0") abc123def 456efgh
+
+  # Specify a repository path
+  $(basename "$0") ~/my-project work HEAD
+EOF
+}
+
+
+# --- 参数检查与解析 ---
+if [ "$#" -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    show_help
+    exit 0
+fi
+
+if [ "$#" -lt 2 ]; then
+    echo "Error: Invalid number of arguments." >&2
+    echo "Run '$(basename "$0") --help' for usage details." >&2
+    exit 1
+fi
+
+# 解析参数，支持可选的仓库路径
+if [ -d "$1" ] && [ $# -eq 3 ]; then
+    REPO_PATH=$(realpath "$1") # 使用 realpath 获取绝对路径
+    REF1="$2"
+    REF2="$3"
+else
+    # 检查当前目录是否为 git 仓库
+    if ! git -C "." rev-parse --is-inside-work-tree &> /dev/null; then
+        echo "Error: Not a git repository: $(pwd)" >&2
+        echo "Please run from within a git repo or specify the path as the first argument." >&2
+        exit 1
+    fi
+    REPO_PATH="."
+    REF1="$1"
+    REF2="$2"
+fi
+
+# --- 环境检查 ---
+if ! command -v "$DIFF_TOOL" &> /dev/null; then
+    echo "Error: Diff tool '$DIFF_TOOL' not found." >&2
+    echo "Please ensure it is installed and in your PATH, or change the DIFF_TOOL variable in the script." >&2
+    exit 1
+fi
+
+# --- 核心逻辑 ---
+
+# 创建一个唯一的父临时目录，用于存放本次比较的所有内容
+PARENT_TEMP_DIR=$(mktemp -d -t git-compare-XXXXXXXX)
+
+# 定义清理函数
+cleanup() {
+    echo "Cleaning up temp directory: $PARENT_TEMP_DIR"
+    rm -rf "$PARENT_TEMP_DIR"
+}
+
+# 无论脚本如何退出（正常、错误、Ctrl+C），都执行清理操作
+trap cleanup EXIT
+
+# 函数：根据引用类型，将文件内容填充到目标目录
+populate_dir_from_ref() {
+    local repo_path="$1"
+    local ref="$2"
+    local target_dir="$3"
+    local ref_for_git="$ref"
+
+    # 将关键字 'stash' 转换为 'stash@{0}'
+    if [[ "$ref" == "stash" ]]; then
+        ref_for_git="stash@{0}"
+    fi
+
+    echo "--> Populating from '$ref' into $(basename "$target_dir")"
+    mkdir -p "$target_dir"
+
+    case "$ref" in
+        work)
+            echo "    (Exporting working directory...)"
+            # 使用 git ls-files 列出所有跟踪的文件，然后用 rsync 复制
+            # 这能正确处理目录结构，并且比逐个复制文件快得多
+            # -c: cached, -m: modified, -o: others, --exclude-standard: use .gitignore
+            git -C "$repo_path" ls-files -cmo --exclude-standard | rsync -a --files-from=- "$repo_path/" "$target_dir/"
+            ;;
+
+        stage)
+            echo "    (Exporting staging area/index...)"
+            # 使用 git checkout-index 将暂存区内容检出到目标目录
+            # 这是最直接、最准确的方法
+            # -a: all files, -f: force overwrite, --prefix: specify target dir
+            git -C "$repo_path" checkout-index -a -f --prefix="$target_dir/"
+            ;;
+
+        *)
+            echo "    (Exporting from git ref: '$ref_for_git')"
+            # 检查引用是否存在
+            if ! git -C "$repo_path" rev-parse --verify --quiet "$ref_for_git^{tree}" >/dev/null; then
+                echo "Error: Git reference '$ref' ('$ref_for_git') is not a valid tree-ish object." >&2
+                exit 1
+            fi
+            # 使用 git archive 导出 commit/stash/tag/branch
+            git -C "$repo_path" archive "$ref_for_git" | tar -x -C "$target_dir"
+            ;;
+    esac
+}
+
+# 函数：获取并清理引用的标签名，用于目录和 BC 标题
+get_label() {
+    local repo_path="$1"
+    local ref="$2"
+
+    case "$ref" in
+        work|stage)
+            # 对于关键字，直接使用它们作为标签
+            echo "$ref"
+            ;;
+        *)
+            local ref_for_git="$ref"
+            if [[ "$ref" == "stash" ]]; then
+                ref_for_git="stash@{0}"
+            fi
+            # 尝试使用 git describe 获取更友好的名称，失败则回退到短哈希
+            # 将非法字符 / 替换为 _，以便用于目录名
+            git -C "$repo_path" describe --always --all "$ref_for_git" 2>/dev/null | tr '/' '_'
+            ;;
+    esac
+}
+
+# --- 执行 ---
+
+# 获取并清理两个引用的标签
+LABEL1=$(get_label "$REPO_PATH" "$REF1")
+LABEL2=$(get_label "$REPO_PATH" "$REF2")
+
+# 在父目录下创建带标签的子目录
+# 添加唯一的后缀避免潜在的标签冲突 (例如 'main' vs 'origin_main' 可能都解析为 'main')
+COMPARE_DIR1="${PARENT_TEMP_DIR}/${LABEL1}_1"
+COMPARE_DIR2="${PARENT_TEMP_DIR}/${LABEL2}_2"
+
+echo "================================================="
+echo "Starting comparison:"
+echo "  1: $REF1 (as $LABEL1)"
+echo "  2: $REF2 (as $LABEL2)"
+echo "================================================="
+
+# 填充两个目录
+populate_dir_from_ref "$REPO_PATH" "$REF1" "$COMPARE_DIR1"
+populate_dir_from_ref "$REPO_PATH" "$REF2" "$COMPARE_DIR2"
+
+# 启动比较工具，并使用 -wait 参数等待其关闭
+# BC 的标题会显示清晰的目录名
+echo
+echo "Launching $DIFF_TOOL... (will clean up automatically after it closes)"
+"$DIFF_TOOL" -wait "$COMPARE_DIR1" "$COMPARE_DIR2"
+
+echo "$DIFF_TOOL closed."
