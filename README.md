@@ -31,23 +31,10 @@ Standard `git diff` is powerful, but its terminal-based, file-by-file output can
 
 We recommend placing the `gcmp` script in your system's `PATH` for easy access from any repository.
 
-### Quick Install (Recommended)
-
-Run the following command in your terminal to automatically download the script, grant permissions, and move it to `/usr/local/bin`.
-
-```bash
-# Download the script
-curl -o gcmp https://raw.githubusercontent.com/path/to/your/script/gcmp.sh
-# Grant execute permissions
-chmod +x gcmp
-# Move it to a directory in your PATH (may require sudo)
-sudo mv gcmp /usr/local/bin/gcmp
-```
-> **Note**: Please replace the `https://raw.githubusercontent.com/...` URL with the actual raw URL of your script.
 
 ### Manual Install
 
-1.  Save the script's code as `gcmp.sh` or simply `gcmp`.
+1.  Download gcmp.
 2.  Give it execute permissions in your terminal: `chmod +x gcmp`.
 3.  Move this file to a directory included in your `PATH` environment variable, such as `~/bin` or `/usr/local/bin`.
 

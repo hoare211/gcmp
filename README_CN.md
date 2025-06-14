@@ -2,8 +2,6 @@
 
 `gcmp` (Git Compare) 是一个强大的命令行脚本，它利用 Beyond Compare（或其他图形化比较工具）来直观地比较 Git 仓库中的任意两个“区域”。它将 `git diff` 的灵活性与图形化工具的易用性完美结合，极大地提升了代码审查和变更分析的效率。
 
-[English Version](./README.en.md) <!-- 你可以稍后创建一个英文版本 -->
-
  <!-- 建议：如果你能录制一个简短的GIF演示，放在这里会非常吸引人 -->
 
 ---
@@ -31,23 +29,10 @@
 
 我们推荐将 `gcmp` 脚本放置在你的系统 `PATH` 中，以便在任何仓库中都能方便地调用。
 
-### 快速安装 (推荐)
-
-在你的终端中运行以下命令，即可自动下载脚本、授予权限并移动到 `/usr/local/bin`。
-
-```bash
-# 下载脚本
-curl -o gcmp https://raw.githubusercontent.com/path/to/your/script/gcmp.sh
-# 授予执行权限
-chmod +x gcmp
-# 移动到 PATH 目录 (可能需要 sudo)
-sudo mv gcmp /usr/local/bin/gcmp
-```
-> **注意**: 请将上面的 `https://raw.githubusercontent.com/...` URL 替换为你的脚本实际所在的 Raw URL。
 
 ### 手动安装
 
-1.  将脚本代码保存为 `gcmp.sh` 或 `gcmp`。
+1.  下载 `gcmp`。
 2.  在终端中为它添加执行权限: `chmod +x gcmp`。
 3.  将此文件移动到一个包含在你 `PATH` 环境变量中的目录，例如 `~/bin` 或 `/usr/local/bin`。
 

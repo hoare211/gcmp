@@ -20,8 +20,10 @@ cat << EOF
 Usage: $(basename "$0") [repo_path] <ref1> <ref2>
 
 A powerful git comparison script that uses an external diff tool.
-
 It can compare any two git "areas" or references.
+
+The 'work' keyword is treated specially: it uses the live working
+directory for comparison, allowing for on-the-fly edits.
 
 Arguments:
   repo_path     (Optional) Path to the git repository. If omitted, uses the current directory.
@@ -29,7 +31,7 @@ Arguments:
   <ref2>        The second reference to compare.
 
 Special Keywords for <ref1> and <ref2>:
-  work          The working directory (all tracked files).
+  work          The working directory (live, not a copy).
   stage         The staging area (the index).
   stash         The most recent stash (equivalent to 'stash@{0}').
   <commit-ish>  Any valid git reference like a commit hash (abc123d),
@@ -84,7 +86,7 @@ else
         echo "Please run from within a git repo or specify the path as the first argument." >&2
         exit 1
     fi
-    REPO_PATH="."
+    REPO_PATH=$(realpath ".")
     REF1="$1"
     REF2="$2"
 fi
@@ -98,7 +100,8 @@ fi
 
 # --- 核心逻辑 ---
 
-# 创建一个唯一的父临时目录，用于存放本次比较的所有内容
+# 创建一个唯一的父临时目录，用于存放本次比较中需要导出的内容
+# 注意：工作目录 'work' 不会存放在这里
 PARENT_TEMP_DIR=$(mktemp -d -t git-compare-XXXXXXXX)
 
 # 定义清理函数
@@ -111,6 +114,7 @@ cleanup() {
 trap cleanup EXIT
 
 # 函数：根据引用类型，将文件内容填充到目标目录
+# 注意：此函数不再处理 'work' 关键字
 populate_dir_from_ref() {
     local repo_path="$1"
     local ref="$2"
@@ -122,26 +126,15 @@ populate_dir_from_ref() {
         ref_for_git="stash@{0}"
     fi
 
-    echo "--> Populating from '$ref' into $(basename "$target_dir")"
+    echo "--> Populating snapshot of '$ref' into $(basename "$target_dir")"
     mkdir -p "$target_dir"
 
     case "$ref" in
-        work)
-            echo "    (Exporting working directory...)"
-            # 使用 git ls-files 列出所有跟踪的文件，然后用 rsync 复制
-            # 这能正确处理目录结构，并且比逐个复制文件快得多
-            # -c: cached, -m: modified, -o: others, --exclude-standard: use .gitignore
-            git -C "$repo_path" ls-files -cmo --exclude-standard | rsync -a --files-from=- "$repo_path/" "$target_dir/"
-            ;;
-
         stage)
             echo "    (Exporting staging area/index...)"
             # 使用 git checkout-index 将暂存区内容检出到目标目录
-            # 这是最直接、最准确的方法
-            # -a: all files, -f: force overwrite, --prefix: specify target dir
             git -C "$repo_path" checkout-index -a -f --prefix="$target_dir/"
             ;;
-
         *)
             echo "    (Exporting from git ref: '$ref_for_git')"
             # 检查引用是否存在
@@ -179,29 +172,49 @@ get_label() {
 
 # --- 执行 ---
 
-# 获取并清理两个引用的标签
+# 检查是否在比较 work 和 work
+if [[ "$REF1" == "work" && "$REF2" == "work" ]]; then
+    echo "Error: Comparing the working directory with itself is not useful." >&2
+    exit 1
+fi
+
+# 获取两个引用的标签
 LABEL1=$(get_label "$REPO_PATH" "$REF1")
 LABEL2=$(get_label "$REPO_PATH" "$REF2")
 
-# 在父目录下创建带标签的子目录
-# 添加唯一的后缀避免潜在的标签冲突 (例如 'main' vs 'origin_main' 可能都解析为 'main')
-COMPARE_DIR1="${PARENT_TEMP_DIR}/${LABEL1}_1"
-COMPARE_DIR2="${PARENT_TEMP_DIR}/${LABEL2}_2"
+echo "================================================="
+echo "Preparing comparison:"
+
+# --- 处理第一个比较对象 ---
+if [[ "$REF1" == "work" ]]; then
+    # 如果是工作目录，直接使用仓库路径
+    COMPARE_PATH1="$REPO_PATH"
+    echo "  1: $REF1 (using live directory: $COMPARE_PATH1)"
+else
+    # 否则，在临时目录中创建快照
+    COMPARE_PATH1="${PARENT_TEMP_DIR}/${LABEL1}"
+    echo "  1: $REF1 (creating snapshot...)"
+    populate_dir_from_ref "$REPO_PATH" "$REF1" "$COMPARE_PATH1"
+fi
+
+# --- 处理第二个比较对象 ---
+if [[ "$REF2" == "work" ]]; then
+    # 如果是工作目录，直接使用仓库路径
+    COMPARE_PATH2="$REPO_PATH"
+    echo "  2: $REF2 (using live directory: $COMPARE_PATH2)"
+else
+    # 否则，在临时目录中创建快照
+    COMPARE_PATH2="${PARENT_TEMP_DIR}/${LABEL2}"
+    echo "  2: $REF2 (creating snapshot...)"
+    populate_dir_from_ref "$REPO_PATH" "$REF2" "$COMPARE_PATH2"
+fi
 
 echo "================================================="
-echo "Starting comparison:"
-echo "  1: $REF1 (as $LABEL1)"
-echo "  2: $REF2 (as $LABEL2)"
-echo "================================================="
-
-# 填充两个目录
-populate_dir_from_ref "$REPO_PATH" "$REF1" "$COMPARE_DIR1"
-populate_dir_from_ref "$REPO_PATH" "$REF2" "$COMPARE_DIR2"
 
 # 启动比较工具，并使用 -wait 参数等待其关闭
-# BC 的标题会显示清晰的目录名
+# 比较工具的标题会显示清晰的目录名
 echo
 echo "Launching $DIFF_TOOL... (will clean up automatically after it closes)"
-"$DIFF_TOOL" -wait "$COMPARE_DIR1" "$COMPARE_DIR2"
+"$DIFF_TOOL" -wait "$COMPARE_PATH1" "$COMPARE_PATH2"
 
 echo "$DIFF_TOOL closed."
