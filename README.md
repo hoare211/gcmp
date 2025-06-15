@@ -12,10 +12,10 @@ English | [简体中文](README_CN.md)
 
 *   **Intuitive Keywords**: Use simple keywords like `work`, `stage`, and `stash` to represent the working directory, staging area, and the latest stash.
 *   **Full-Spectrum Comparison**: Supports comparison between the **Working Directory**, **Staging Area**, **Stash**, and any **commit, branch, or tag**.
-*   **Smart Labeling**: Automatically generates clean labels for the comparison sources (e.g., branch names or `work`) and displays them in the diff tool's title bar and temporary directories for clarity.
-*   **Directory-Level Diffing**: Exports the state of your Git areas into full directory trees, giving you a high-level overview of all file changes.
+*   **Live Editing & Performance**: When comparing the `work` directory, `gcmp` uses your actual project folder. This allows you to **edit files directly in your diff tool** and enjoy instant comparisons without any copying overhead.
+*   **Smart Auto-Upgrading**: The script is smart! If you provide a reference like `HEAD` or a branch name, and it matches your clean working directory, `gcmp` automatically uses the live directory for comparison. You get the performance and editing benefits without explicitly typing `work`.
 *   **Highly Customizable**: Easily switch the default `bcompare` to your favorite diff tool (like `kdiff3`, `meld`, `vscode`, etc.).
-*   **Safe and Reliable**: All operations are performed in temporary directories that are automatically cleaned up on exit, never polluting your workspace.
+*   **Safe and Reliable**: References that don't qualify for live comparison are safely exported to temporary directories that are automatically cleaned up on exit, protecting your repository's state.
 
 ## ❓ Why use `gcmp`?
 
@@ -24,17 +24,16 @@ Standard `git diff` is powerful, but its terminal-based, file-by-file output can
 `gcmp` solves the following pain points:
 
 1.  **The Big Picture**: Want to know exactly which files were changed, added, or deleted in `feature-A` compared to `main`? `gcmp` presents this clearly as a directory tree.
-2.  **Simplified Complex Comparisons**: An operation like `git diff work stage` doesn't exist natively. But `gcmp work stage` makes it trivial, clearly showing which changes in your working directory have not yet been staged with `git add`.
+2.  **Simplified Complex Comparisons**: An operation like `git diff work stage` doesn't exist natively. But `gcmp work stage` makes it trivial, clearly showing which changes in your working directory have not yet been staged.
 3.  **GUI Advantage**: For complex changes within a single file, a GUI tool's side-by-side scrolling, syntax highlighting, and inline diffs are far more intuitive than the `+` and `-` lines in a terminal.
 
 ## 🚀 Installation
 
 We recommend placing the `gcmp` script in your system's `PATH` for easy access from any repository.
 
-
 ### Manual Install
 
-1.  Download gcmp.
+1.  Download `gcmp`.
 2.  Give it execute permissions in your terminal: `chmod +x gcmp`.
 3.  Move this file to a directory included in your `PATH` environment variable, such as `~/bin` or `/usr/local/bin`.
 
@@ -55,7 +54,7 @@ This is the core magic of `gcmp`, making complex comparisons simple.
 
 | Keyword | Represents Git Area | Description                                                  |
 |:--------|:--------------------|:-------------------------------------------------------------|
-| `work`  | Working Directory   | All tracked files as they currently exist in your workspace. |
+| `work`  | Working Directory   | All tracked files as they currently exist. This is a **live view**¡ªchanges you make in the diff tool are saved directly to your files! |
 | `stage` | Staging Area (Index)| Content that has been added with `git add` for the next commit. |
 | `stash` | The Latest Stash    | Represents `stash@{0}`, your most recent stash.              |
 
@@ -77,6 +76,8 @@ gcmp work stage
 ```
 **It answers:** "What changes will be added to the index if I run `git add .` right now?"
 
+**Pro-Tip**: You can edit your files on the `work` side of the comparison, save them, and they are immediately updated in your actual working directory, ready for you to `git add`.
+
 ---
 
 #### 2. Compare Staging Area vs. Last Commit
@@ -85,6 +86,8 @@ gcmp work stage
 gcmp stage HEAD
 ```
 **It answers:** "What will the snapshot look like if I run `git commit` right now?" (This is the graphical equivalent of `git diff --staged`)
+
+**Pro-Tip**: On a clean repository, you can run `gcmp HEAD HEAD~1`. `gcmp` will automatically use your live working directory for `HEAD`, giving you the fastest possible comparison. <!-- ADDED -->
 
 ---
 
@@ -161,13 +164,12 @@ Ensure your chosen tool's command is in your system `PATH` and that it supports 
 ## ⚙️ How It Works
 
 1.  **Parse Arguments**: The script first determines the repository path and the two references (`ref1` and `ref2`) from the command-line arguments.
-2.  **Create Temporary Environment**: It creates a unique temporary directory (e.g., `/tmp/git-compare-XXXXXX`) and sets a `trap` command to ensure this directory is automatically deleted when the script exits (whether on success, failure, or interruption).
-3.  **Export Content**:
-    *   For `work`, it uses `git ls-files` to list all tracked files and `rsync` to efficiently copy them into a temporary subdirectory. This ensures only Git-managed files are compared.
-    *   For `stage`, it uses `git checkout-index`, the most direct and accurate method for exporting the staging area to a directory.
-    *   For all other Git references (commits, branches, tags, stashes), it uses `git archive` to export the complete file tree of that reference into a temporary subdirectory.
-4.  **Launch Diff Tool**: It passes the two populated temporary subdirectories to your configured `DIFF_TOOL`. The script uses a `-wait` flag (if supported) to pause until you close the diff tool.
-5.  **Automatic Cleanup**: Once you close the diff tool, the script resumes, and the `trap` command is triggered on exit, completely removing all temporary files and directories.
+2.  **Prepare Comparison Environment**: It creates a unique temporary parent directory and sets a `trap` command to ensure this directory is automatically deleted when the script exits.
+3.  **Intelligently Resolve Sources**: For each of the two references, the script decides the best way to present it:
+    *   **Live Directory**: If the reference is the `work` keyword, OR if it's a reference (like `HEAD`) that matches a clean working directory, the script uses the **direct path to your repository**. This is the fastest method and enables live editing.
+    *   **Temporary Snapshot**: If a reference doesn't qualify for live comparison (e.g., it's an old commit, `stage`, or `stash`), it is exported to a temporary subdirectory using the most appropriate Git command (`git checkout-index` for `stage`, `git archive` for others).
+4.  **Launch Diff Tool**: Before launching, it performs a final check to ensure the two resolved paths are not identical (preventing self-comparison). It then passes the paths for each side to your configured `DIFF_TOOL`, using a `-wait` flag to pause until you close the tool.
+5.  **Automatic Cleanup**: Once you close the diff tool, the script resumes, and the `trap` command is triggered on exit, completely removing any temporary directories created during the process.
 
 ## ⚠️ Dependencies & Requirements
 

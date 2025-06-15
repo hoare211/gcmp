@@ -25,6 +25,10 @@ It can compare any two git "areas" or references.
 The 'work' keyword is treated specially: it uses the live working
 directory for comparison, allowing for on-the-fly edits.
 
+The script is smart: if you provide a reference (like HEAD or a branch name)
+that points to the same commit as a clean working directory, it will
+automatically use the live directory instead of creating a temporary copy.
+
 Arguments:
   repo_path     (Optional) Path to the git repository. If omitted, uses the current directory.
   <ref1>        The first reference to compare.
@@ -47,17 +51,11 @@ Examples:
   # Compare staging area with a feature branch
   $(basename "$0") stage my-feature
 
-  # Compare the latest stash with the main branch
-  $(basename "$0") stash main
-
-  # Compare two different stashes
-  $(basename "$0") 'stash@{0}' 'stash@{1}'
-
-  # Compare two commits (original functionality)
+  # Compare two commits
   $(basename "$0") abc123def 456efgh
 
-  # Specify a repository path
-  $(basename "$0") ~/my-project work HEAD
+  # Compare HEAD with its parent (when work dir is clean, HEAD is treated as 'work')
+  $(basename "$0") HEAD HEAD~1
 EOF
 }
 
@@ -101,7 +99,6 @@ fi
 # --- 核心逻辑 ---
 
 # 创建一个唯一的父临时目录，用于存放本次比较中需要导出的内容
-# 注意：工作目录 'work' 不会存放在这里
 PARENT_TEMP_DIR=$(mktemp -d -t git-compare-XXXXXXXX)
 
 # 定义清理函数
@@ -113,15 +110,34 @@ cleanup() {
 # 无论脚本如何退出（正常、错误、Ctrl+C），都执行清理操作
 trap cleanup EXIT
 
+# 函数：判断一个引用是否等价于一个干净的工作区
+is_ref_equivalent_to_clean_work_dir() {
+    local repo_path="$1"
+    local ref="$2"
+
+    # 解析引用的 commit hash，如果失败则不等价
+    local ref_hash
+    ref_hash=$(git -C "$repo_path" rev-parse --verify "$ref^{commit}" 2>/dev/null) || return 1
+
+    # 获取 HEAD 的 commit hash
+    local head_hash
+    head_hash=$(git -C "$repo_path" rev-parse HEAD)
+
+    # 比较两个 hash 是否相同
+    if [[ "$ref_hash" == "$head_hash" ]]; then
+        return 0 # 相同，返回成功
+    else
+        return 1 # 不相同，返回失败
+    fi
+}
+
 # 函数：根据引用类型，将文件内容填充到目标目录
-# 注意：此函数不再处理 'work' 关键字
 populate_dir_from_ref() {
     local repo_path="$1"
     local ref="$2"
     local target_dir="$3"
     local ref_for_git="$ref"
 
-    # 将关键字 'stash' 转换为 'stash@{0}'
     if [[ "$ref" == "stash" ]]; then
         ref_for_git="stash@{0}"
     fi
@@ -132,30 +148,26 @@ populate_dir_from_ref() {
     case "$ref" in
         stage)
             echo "    (Exporting staging area/index...)"
-            # 使用 git checkout-index 将暂存区内容检出到目标目录
             git -C "$repo_path" checkout-index -a -f --prefix="$target_dir/"
             ;;
         *)
             echo "    (Exporting from git ref: '$ref_for_git')"
-            # 检查引用是否存在
             if ! git -C "$repo_path" rev-parse --verify --quiet "$ref_for_git^{tree}" >/dev/null; then
                 echo "Error: Git reference '$ref' ('$ref_for_git') is not a valid tree-ish object." >&2
                 exit 1
             fi
-            # 使用 git archive 导出 commit/stash/tag/branch
             git -C "$repo_path" archive "$ref_for_git" | tar -x -C "$target_dir"
             ;;
     esac
 }
 
-# 函数：获取并清理引用的标签名，用于目录和 BC 标题
+# 函数：获取引用的标签名
 get_label() {
     local repo_path="$1"
     local ref="$2"
 
     case "$ref" in
         work|stage)
-            # 对于关键字，直接使用它们作为标签
             echo "$ref"
             ;;
         *)
@@ -163,8 +175,6 @@ get_label() {
             if [[ "$ref" == "stash" ]]; then
                 ref_for_git="stash@{0}"
             fi
-            # 尝试使用 git describe 获取更友好的名称，失败则回退到短哈希
-            # 将非法字符 / 替换为 _，以便用于目录名
             git -C "$repo_path" describe --always --all "$ref_for_git" 2>/dev/null | tr '/' '_'
             ;;
     esac
@@ -172,47 +182,62 @@ get_label() {
 
 # --- 执行 ---
 
-# 检查是否在比较 work 和 work
-if [[ "$REF1" == "work" && "$REF2" == "work" ]]; then
-    echo "Error: Comparing the working directory with itself is not useful." >&2
-    exit 1
-fi
-
-# 获取两个引用的标签
-LABEL1=$(get_label "$REPO_PATH" "$REF1")
-LABEL2=$(get_label "$REPO_PATH" "$REF2")
-
 echo "================================================="
 echo "Preparing comparison:"
 
+# 预先检查工作区是否干净，避免重复调用
+IS_WORKDIR_CLEAN=false
+if [ -z "$(git -C "$REPO_PATH" status --porcelain)" ]; then
+    IS_WORKDIR_CLEAN=true
+fi
+
 # --- 处理第一个比较对象 ---
+USE_LIVE_DIR_1=false
 if [[ "$REF1" == "work" ]]; then
-    # 如果是工作目录，直接使用仓库路径
+    USE_LIVE_DIR_1=true
+elif [[ "$REF1" != "stage" ]] && [[ "$IS_WORKDIR_CLEAN" == "true" ]] && is_ref_equivalent_to_clean_work_dir "$REPO_PATH" "$REF1"; then
+    echo "  (Note: '$REF1' matches the clean working directory, using live path for performance)"
+    USE_LIVE_DIR_1=true
+fi
+
+if [[ "$USE_LIVE_DIR_1" == "true" ]]; then
     COMPARE_PATH1="$REPO_PATH"
     echo "  1: $REF1 (using live directory: $COMPARE_PATH1)"
 else
-    # 否则，在临时目录中创建快照
+    LABEL1=$(get_label "$REPO_PATH" "$REF1")
     COMPARE_PATH1="${PARENT_TEMP_DIR}/${LABEL1}"
     echo "  1: $REF1 (creating snapshot...)"
     populate_dir_from_ref "$REPO_PATH" "$REF1" "$COMPARE_PATH1"
 fi
 
 # --- 处理第二个比较对象 ---
+USE_LIVE_DIR_2=false
 if [[ "$REF2" == "work" ]]; then
-    # 如果是工作目录，直接使用仓库路径
+    USE_LIVE_DIR_2=true
+elif [[ "$REF2" != "stage" ]] && [[ "$IS_WORKDIR_CLEAN" == "true" ]] && is_ref_equivalent_to_clean_work_dir "$REPO_PATH" "$REF2"; then
+    echo "  (Note: '$REF2' matches the clean working directory, using live path for performance)"
+    USE_LIVE_DIR_2=true
+fi
+
+if [[ "$USE_LIVE_DIR_2" == "true" ]]; then
     COMPARE_PATH2="$REPO_PATH"
     echo "  2: $REF2 (using live directory: $COMPARE_PATH2)"
 else
-    # 否则，在临时目录中创建快照
+    LABEL2=$(get_label "$REPO_PATH" "$REF2")
     COMPARE_PATH2="${PARENT_TEMP_DIR}/${LABEL2}"
     echo "  2: $REF2 (creating snapshot...)"
     populate_dir_from_ref "$REPO_PATH" "$REF2" "$COMPARE_PATH2"
 fi
 
-echo "================================================="
+# --- 执行比较 ---
+# 检查最终的比较路径是否相同，避免无意义的自身比较
+if [[ "$COMPARE_PATH1" == "$COMPARE_PATH2" ]]; then
+    echo "================================================="
+    echo "Warning: Both references point to the same state. Nothing to compare." >&2
+    exit 0
+fi
 
-# 启动比较工具，并使用 -wait 参数等待其关闭
-# 比较工具的标题会显示清晰的目录名
+echo "================================================="
 echo
 echo "Launching $DIFF_TOOL... (will clean up automatically after it closes)"
 "$DIFF_TOOL" -wait "$COMPARE_PATH1" "$COMPARE_PATH2"
